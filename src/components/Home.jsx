@@ -14,8 +14,16 @@ const PRESET_URLS = [
 ];
 
 export default function Home({ schema, url, onUrlChange }) {
+  console.log('=== HOME COMPONENT DEBUG ===');
+  console.log('schema:', schema);
+  console.log('url:', url);
+  console.log('schema truthy:', !!schema);
+  
   const [inputUrl, setInputUrl] = useState(url);
   const [dropdownValue, setDropdownValue] = useState(url);
+
+  console.log('Home component rendered with schema:', schema);
+  console.log('Schema type:', typeof schema);
 
   const handleDropdownChange = (e) => {
     const selected = e.target.value;
@@ -108,7 +116,10 @@ export default function Home({ schema, url, onUrlChange }) {
   const QueryCard = ({ query, type = 'query' }) => (
     <Link 
       to={`/${type}/${query.name}`}
-      style={{ textDecoration: 'none', color: 'inherit' }}
+      style={{ 
+        textDecoration: 'none', 
+        color: 'inherit'
+      }}
     >
       <div style={{
         border: '1px solid #ddd',

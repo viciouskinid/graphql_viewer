@@ -5,10 +5,37 @@ export default function QueryDetail({ schema, url }) {
   const { type, queryName } = useParams();
   const [selectedFields, setSelectedFields] = useState([]);
   const [args, setArgs] = useState({});
+  const [fieldArgs, setFieldArgs] = useState({}); // Arguments for individual fields
   const [connectionFields, setConnectionFields] = useState({});
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // Auto-set default pagination values when component loads
+  useEffect(() => {
+    const queryType = type === 'mutation' 
+      ? schema.types.find(t => t.name === schema.mutationType?.name)
+      : schema.types.find(t => t.name === schema.queryType.name);
+    
+    const operation = queryType?.fields?.find(q => q.name === queryName);
+    
+    if (operation?.args) {
+      const newArgs = {};
+      const hasFirst = operation.args.some(arg => arg.name === 'first');
+      const hasLast = operation.args.some(arg => arg.name === 'last');
+      
+      // For queries that have pagination, set a default 'first' value
+      if (hasFirst) {
+        newArgs['first'] = '10';
+      } else if (hasLast) {
+        newArgs['last'] = '10';
+      }
+      
+      if (Object.keys(newArgs).length > 0) {
+        setArgs(newArgs);
+      }
+    }
+  }, [schema, type, queryName]); // Re-run when these change
 
   if (!schema) {
     return (
@@ -92,13 +119,46 @@ export default function QueryDetail({ schema, url }) {
     setSelectedFields(prev => {
       const isAdding = !prev.includes(fieldName);
       if (isAdding) {
+        // Auto-select some default fields for connection types
+        const field = getAvailableFields(operation.type).find(f => f.name === fieldName);
+        if (isConnectionField(field)) {
+          const nodeFields = getConnectionNodeFields(field);
+          const defaultFields = nodeFields.slice(0, 5).map(f => f.name); // Select first 5 fields
+          if (defaultFields.length > 0) {
+            setConnectionFields(prevConn => ({
+              ...prevConn,
+              [fieldName]: defaultFields
+            }));
+          }
+          
+          // Auto-set pagination arguments for connection fields
+          if (field.args && field.args.length > 0) {
+            const hasFirst = field.args.some(arg => arg.name === 'first');
+            const hasLast = field.args.some(arg => arg.name === 'last');
+            
+            if (hasFirst || hasLast) {
+              setFieldArgs(prevFieldArgs => ({
+                ...prevFieldArgs,
+                [fieldName]: {
+                  ...prevFieldArgs[fieldName],
+                  [hasFirst ? 'first' : 'last']: '10'  // Keep as string for input field, will be converted during query building
+                }
+              }));
+            }
+          }
+        }
         return [...prev, fieldName];
       } else {
-        // Remove connection fields when main field is removed
+        // Remove connection fields and field args when main field is removed
         setConnectionFields(prevConn => {
           const newConn = { ...prevConn };
           delete newConn[fieldName];
           return newConn;
+        });
+        setFieldArgs(prevFieldArgs => {
+          const newFieldArgs = { ...prevFieldArgs };
+          delete newFieldArgs[fieldName];
+          return newFieldArgs;
         });
         return prev.filter(f => f !== fieldName);
       }
@@ -119,18 +179,56 @@ export default function QueryDetail({ schema, url }) {
     setArgs(prev => ({ ...prev, [argName]: value }));
   };
 
+  const handleFieldArgChange = (fieldName, argName, value) => {
+    setFieldArgs(prev => ({
+      ...prev,
+      [fieldName]: {
+        ...prev[fieldName],
+        [argName]: value
+      }
+    }));
+  };
+
   const buildSelectionSet = (fields) => {
     return fields.map(fieldName => {
       const field = getAvailableFields(operation.type).find(f => f.name === fieldName);
       if (!field) return fieldName;
 
+      // Build field arguments if any
+      const currentFieldArgs = fieldArgs[fieldName] || {};
+      const argString = Object.keys(currentFieldArgs).length > 0
+        ? `(${Object.entries(currentFieldArgs)
+            .map(([key, value]) => {
+              // Find the argument definition to get its type
+              const argDef = field.args?.find(arg => arg.name === key);
+              if (argDef && value !== '') {
+                const argType = argDef.type.kind === 'NON_NULL' ? argDef.type.ofType : argDef.type;
+                // Type coercion based on argument type
+                if (argType.name === 'Int') {
+                  const intValue = parseInt(value, 10);
+                  return `${key}: ${isNaN(intValue) ? 'null' : intValue}`;
+                } else if (argType.name === 'Float') {
+                  const floatValue = parseFloat(value);
+                  return `${key}: ${isNaN(floatValue) ? 'null' : floatValue}`;
+                } else if (argType.name === 'Boolean') {
+                  return `${key}: ${value === 'true'}`;
+                } else {
+                  return `${key}: ${JSON.stringify(value)}`;
+                }
+              }
+              return null;
+            })
+            .filter(Boolean)
+            .join(', ')})`
+        : '';
+
       if (isConnectionField(field)) {
         const subFields = connectionFields[fieldName] || [];
         if (subFields.length === 0) {
-          return `${fieldName} { edges { node { __typename } } pageInfo { endCursor hasNextPage } }`;
+          return `${fieldName}${argString} { edges { node { __typename } } pageInfo { endCursor hasNextPage } }`;
         }
         const nodeSelection = subFields.join('\n          ');
-        return `${fieldName} {
+        return `${fieldName}${argString} {
         edges {
           node {
             ${nodeSelection}
@@ -148,10 +246,10 @@ export default function QueryDetail({ schema, url }) {
           .slice(0, 5)
           .map(f => f.name)
           .join('\n        ');
-        return subFields ? `${fieldName} {\n        ${subFields}\n      }` : fieldName;
+        return subFields ? `${fieldName}${argString} {\n        ${subFields}\n      }` : fieldName;
       }
       
-      return fieldName;
+      return `${fieldName}${argString}`;
     }).join('\n    ');
   };
 
@@ -215,7 +313,7 @@ export default function QueryDetail({ schema, url }) {
   const availableFields = getAvailableFields(operation.type);
 
   return (
-    <div>
+    <div style={{ color: '#333' }}>
       <div style={{ marginBottom: '2rem' }}>
         <Link to="/" style={{ color: '#3498db', textDecoration: 'none' }}>
           ← Back to Operations
@@ -254,13 +352,28 @@ export default function QueryDetail({ schema, url }) {
           marginBottom: '2rem'
         }}>
           <h3 style={{ color: '#2c3e50', marginBottom: '1rem' }}>Arguments</h3>
+          {operation.args.some(arg => ['first', 'last'].includes(arg.name)) && (
+            <div style={{
+              backgroundColor: '#e8f4f8',
+              border: '1px solid #3498db',
+              padding: '0.75rem',
+              borderRadius: '4px',
+              marginBottom: '1rem',
+              fontSize: '0.9rem'
+            }}>
+              <strong>💡 Pagination Required:</strong> This query requires either <code>first</code> or <code>last</code> to be specified for pagination.
+            </div>
+          )}
           <div style={{ display: 'grid', gap: '1rem' }}>
             {operation.args.map(arg => (
               <div key={arg.name}>
                 <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
                   {arg.name}
                   <span style={{ color: '#666', fontWeight: 'normal' }}> ({renderType(arg.type)})</span>
-                  {arg.type.kind === 'NON_NULL' && <span style={{ color: '#e74c3c' }}> *</span>}
+                  {arg.type.kind === 'NON_NULL' && <span style={{ color: '#e74c3c' }}> * REQUIRED</span>}
+                  {['first', 'last', 'after', 'before'].includes(arg.name) && (
+                    <span style={{ color: '#3498db', fontWeight: 'normal', fontSize: '0.85rem' }}> [Pagination]</span>
+                  )}
                 </label>
                 {arg.description && (
                   <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 0.5rem 0' }}>
@@ -271,7 +384,13 @@ export default function QueryDetail({ schema, url }) {
                   type="text"
                   value={args[arg.name] || ''}
                   onChange={(e) => handleArgChange(arg.name, e.target.value)}
-                  placeholder={arg.type.kind === 'NON_NULL' ? 'Required' : 'Optional'}
+                  placeholder={
+                    arg.name === 'first' ? 'e.g. 10 (number of items to fetch)' :
+                    arg.name === 'last' ? 'e.g. 10 (number of items from end)' :
+                    arg.name === 'after' ? 'e.g. cursor string (fetch items after this cursor)' :
+                    arg.name === 'before' ? 'e.g. cursor string (fetch items before this cursor)' :
+                    arg.type.kind === 'NON_NULL' ? 'Required' : 'Optional'
+                  }
                   style={{
                     width: '100%',
                     padding: '0.75rem',
@@ -280,6 +399,29 @@ export default function QueryDetail({ schema, url }) {
                     fontSize: '1rem'
                   }}
                 />
+                {(arg.name === 'first' || arg.name === 'last') && (
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <span style={{ fontSize: '0.85rem', color: '#666', marginRight: '0.5rem' }}>Quick set:</span>
+                    {[5, 10, 20, 50].map(num => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => handleArgChange(arg.name, num.toString())}
+                        style={{
+                          backgroundColor: '#f8f9fa',
+                          border: '1px solid #ddd',
+                          padding: '0.25rem 0.5rem',
+                          marginRight: '0.25rem',
+                          borderRadius: '3px',
+                          fontSize: '0.8rem',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        {num}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -331,6 +473,18 @@ export default function QueryDetail({ schema, url }) {
                   backgroundColor: '#f1f2f6', 
                   borderRadius: '4px' 
                 }}>
+                  <div style={{ 
+                    marginBottom: '1rem', 
+                    padding: '0.75rem', 
+                    backgroundColor: '#e3f2fd', 
+                    borderRadius: '4px',
+                    border: '1px solid #1976d2'
+                  }}>
+                    <strong style={{ color: '#1976d2' }}>📋 Connection Field:</strong>
+                    <div style={{ fontSize: '0.9rem', color: '#333', marginTop: '0.25rem' }}>
+                      This is a paginated connection. Select the fields below to specify what data you want to retrieve from each {field.name.slice(0, -1)} (removing 's' suffix).
+                    </div>
+                  </div>
                   <h4 style={{ margin: '0 0 1rem 0', color: '#2c3e50' }}>
                     Select {field.name} fields:
                   </h4>
@@ -347,6 +501,48 @@ export default function QueryDetail({ schema, url }) {
                       </label>
                     ))}
                   </div>
+
+                  {/* Field Arguments for Connection Fields */}
+                  {field.args && field.args.length > 0 && (
+                    <div style={{ marginTop: '1rem' }}>
+                      <h4 style={{ margin: '0 0 1rem 0', color: '#2c3e50' }}>
+                        {field.name} arguments:
+                      </h4>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '0.75rem' }}>
+                        {field.args.map(arg => (
+                          <div key={arg.name} style={{ display: 'flex', flexDirection: 'column' }}>
+                            <label style={{ 
+                              fontSize: '0.9rem', 
+                              fontWeight: 'bold', 
+                              color: '#2c3e50',
+                              marginBottom: '0.25rem'
+                            }}>
+                              {arg.name}
+                              {arg.type.kind === 'NON_NULL' && <span style={{ color: '#e74c3c' }}> * REQUIRED</span>}
+                              {['first', 'last', 'after', 'before'].includes(arg.name) && (
+                                <span style={{ color: '#3498db' }}> [Pagination]</span>
+                              )}
+                            </label>
+                            <input
+                              type="text"
+                              value={fieldArgs[field.name]?.[arg.name] || ''}
+                              onChange={(e) => handleFieldArgChange(field.name, arg.name, e.target.value)}
+                              placeholder={`Enter ${arg.name} value`}
+                              style={{
+                                padding: '0.5rem',
+                                border: '1px solid #ddd',
+                                borderRadius: '4px',
+                                fontSize: '0.9rem'
+                              }}
+                            />
+                            <div style={{ fontSize: '0.8rem', color: '#666', marginTop: '0.25rem' }}>
+                              Type: {renderType(arg.type)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -424,7 +620,8 @@ export default function QueryDetail({ schema, url }) {
               overflow: 'auto',
               maxHeight: '500px',
               fontSize: '0.9rem',
-              lineHeight: '1.4'
+              lineHeight: '1.4',
+              color: '#212529'
             }}>
               {JSON.stringify(result, null, 2)}
             </pre>
